@@ -103,11 +103,15 @@ class ZteSms:
         return result
 
     def sms_capacity(self) -> dict:
-        return self._get(
-            "sms_nv_rev_total,sms_nv_send_total,sms_nv_draftbox_total,"
-            "sms_sim_rev_total,sms_sim_send_total,sms_sim_draftbox_total,"
-            "sms_nv_total,sms_sim_total"
+        # comando simple: sin multi_data
+        r = self.session.get(
+            f"{self.base_url}/goform/goform_get_cmd_process",
+            params={"isTest": "false", "cmd": "sms_capacity_info"},
+            headers=self.headers,
+            timeout=self.timeout,
         )
+        r.raise_for_status()
+        return r.json()
 
     def list_sms_ids(self, tags: str = "10", limit: int = 500) -> list[str]:
         """IDs de SMS en el router. tags: 10=todos, 1=recibidos, 2=enviados, 3=borradores."""
@@ -146,15 +150,24 @@ class ZteSms:
         if not self.is_logged_in():
             self.login()
         before = len(self.list_sms_ids(limit=500))
-        for location in ("native_inbox", "native_outbox", "native_draftbox"):
-            result = self._set("ALL_DELETE_SMS", {"notCallback": "true", "which_cgi": location})
-            if result.get("result") not in ("success", "0"):
-                raise ZteApiError(f"Fallo al vaciar {location}: {result}")
-        # el router procesa el borrado de forma asíncrona
-        for _ in range(20):
-            if not self.list_sms_ids(limit=1):
-                break
-            time.sleep(1)
+        # ALL_DELETE_SMS falla si la bandeja está vacía, por eso se ignora el resultado
+        for location in ("native_inbox", "native_outbox", "native_sentbox", "native_draftbox"):
+            self._set("ALL_DELETE_SMS", {"notCallback": "true", "which_cgi": location})
+        time.sleep(2)
+        # lo que quede (p. ej. enviados) se borra por id, en lotes pequeños
+        for size in (10, 1):
+            while True:
+                ids = self.list_sms_ids(limit=size)
+                if not ids:
+                    return before
+                try:
+                    self.delete_sms(ids)
+                except ZteApiError:
+                    break
+                time.sleep(0.3)
+        remaining = len(self.list_sms_ids(limit=500))
+        if remaining:
+            raise ZteApiError(f"No se pudieron borrar {remaining} SMS")
         return before
 
     def logout(self):
