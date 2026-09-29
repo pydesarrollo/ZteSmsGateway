@@ -102,6 +102,42 @@ class ZteSms:
             raise ZteApiError(f"Fallo al enviar SMS: {result}")
         return result
 
+    def sms_capacity(self) -> dict:
+        return self._get("sms_capacity_info")
+
+    def list_sms_ids(self, tags: str = "10", limit: int = 500) -> list[str]:
+        """IDs de SMS en el router. tags: 10=todos, 1=recibidos, 2=enviados, 3=borradores."""
+        if not self.is_logged_in():
+            self.login()
+        data = self._get("sms_data_total", {
+            "page": "0",
+            "data_per_page": str(limit),
+            "mem_store": "1",
+            "tags": tags,
+            "order_by": "order by id desc",
+        })
+        return [m["id"] for m in data.get("messages", [])]
+
+    def delete_sms(self, ids: list[str]) -> dict:
+        if not ids:
+            return {"result": "success"}
+        if not self.is_logged_in():
+            self.login()
+        result = self._set("DELETE_SMS", {"notCallback": "true", "msg_id": ";".join(ids) + ";"})
+        if result.get("result") not in ("success", "0"):
+            raise ZteApiError(f"Fallo al borrar SMS: {result}")
+        return result
+
+    def delete_all_sms(self, batch: int = 100) -> int:
+        """Borra todos los SMS (cualquier bandeja) en lotes. Devuelve cuántos borró."""
+        total = 0
+        while True:
+            ids = self.list_sms_ids(limit=batch)
+            if not ids:
+                return total
+            self.delete_sms(ids)
+            total += len(ids)
+
     def logout(self):
         try:
             self._set("LOGOUT")
