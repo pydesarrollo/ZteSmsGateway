@@ -103,20 +103,33 @@ class ZteSms:
         return result
 
     def sms_capacity(self) -> dict:
-        return self._get("sms_capacity_info")
+        return self._get(
+            "sms_nv_rev_total,sms_nv_send_total,sms_nv_draftbox_total,"
+            "sms_sim_rev_total,sms_sim_send_total,sms_sim_draftbox_total,"
+            "sms_nv_total,sms_sim_total"
+        )
 
     def list_sms_ids(self, tags: str = "10", limit: int = 500) -> list[str]:
         """IDs de SMS en el router. tags: 10=todos, 1=recibidos, 2=enviados, 3=borradores."""
         if not self.is_logged_in():
             self.login()
-        data = self._get("sms_data_total", {
-            "page": "0",
-            "data_per_page": str(limit),
-            "mem_store": "1",
-            "tags": tags,
-            "order_by": "order by id desc",
-        })
-        return [m["id"] for m in data.get("messages", [])]
+        # sms_data_total es un comando simple: sin multi_data, la respuesta trae "messages"
+        r = self.session.get(
+            f"{self.base_url}/goform/goform_get_cmd_process",
+            params={
+                "isTest": "false",
+                "cmd": "sms_data_total",
+                "page": "0",
+                "data_per_page": str(limit),
+                "mem_store": "1",
+                "tags": tags,
+                "order_by": "order by id desc",
+            },
+            headers=self.headers,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return [m["id"] for m in r.json().get("messages", [])]
 
     def delete_sms(self, ids: list[str]) -> dict:
         if not ids:
