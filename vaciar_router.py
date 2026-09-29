@@ -8,7 +8,6 @@ password = sys.argv[2] if len(sys.argv) > 2 else "admin"
 
 z = ZteSms(ip, password)
 z.login()
-print("Antes:", z.sms_capacity())
 print("Borrados:", z.delete_all_sms())
-print("Después:", z.sms_capacity())
+print("Quedan:", len(z.list_sms_ids(limit=500)))
 z.logout()

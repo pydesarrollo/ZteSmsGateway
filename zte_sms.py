@@ -141,15 +141,21 @@ class ZteSms:
             raise ZteApiError(f"Fallo al borrar SMS: {result}")
         return result
 
-    def delete_all_sms(self, batch: int = 100) -> int:
-        """Borra todos los SMS (cualquier bandeja) en lotes. Devuelve cuántos borró."""
-        total = 0
-        while True:
-            ids = self.list_sms_ids(limit=batch)
-            if not ids:
-                return total
-            self.delete_sms(ids)
-            total += len(ids)
+    def delete_all_sms(self) -> int:
+        """Vacía todas las bandejas con ALL_DELETE_SMS. Devuelve cuántos SMS había antes."""
+        if not self.is_logged_in():
+            self.login()
+        before = len(self.list_sms_ids(limit=500))
+        for location in ("native_inbox", "native_outbox", "native_draftbox"):
+            result = self._set("ALL_DELETE_SMS", {"notCallback": "true", "which_cgi": location})
+            if result.get("result") not in ("success", "0"):
+                raise ZteApiError(f"Fallo al vaciar {location}: {result}")
+        # el router procesa el borrado de forma asíncrona
+        for _ in range(20):
+            if not self.list_sms_ids(limit=1):
+                break
+            time.sleep(1)
+        return before
 
     def logout(self):
         try:
