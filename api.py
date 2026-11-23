@@ -37,6 +37,11 @@ BASE_DIR = Path(__file__).resolve().parent
 API_KEY = os.environ.get("SMS_API_KEY", "")
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+# Limpieza automática (0 = desactivada):
+#   MAX_MESSAGES_DB -> mensajes que se conservan en sms_gateway.db por router
+#   MAX_SMS_MODEM   -> si la memoria del módem llega a este número, se vacía antes de enviar
+MAX_MESSAGES_DB = int(os.environ.get("MAX_MESSAGES_DB", "50"))
+MAX_SMS_MODEM = int(os.environ.get("MAX_SMS_MODEM", "50"))
 
 db.init_db()
 
@@ -138,19 +143,33 @@ def send_sms(router_id: str, req: SendSmsRequest, x_api_key: str | None = Header
 
     zte = ZteSms(router_ip=router["ip"], password=router["password"])
     try:
+        # vaciar la memoria del módem antes de que se llene (llena = no envía);
+        # si la limpieza falla, igual se intenta el envío
+        try:
+            borrados = zte.trim_sms(MAX_SMS_MODEM)
+            if borrados:
+                print(f"[{router_id}] memoria del modem vaciada: {borrados} SMS borrados", flush=True)
+        except Exception as e:
+            print(f"[{router_id}] no se pudo vaciar la memoria del modem: {e}", flush=True)
+
         zte.send_sms(req.phone, req.message)
     except ZteApiError as e:
-        db.log_message(router_id, req.phone, req.message, "failed", str(e))
+        _log(router_id, req, "failed", str(e))
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         error = f"Error de conexion con el modem: {e}"
-        db.log_message(router_id, req.phone, req.message, "failed", error)
+        _log(router_id, req, "failed", error)
         raise HTTPException(status_code=500, detail=error)
     finally:
         zte.logout()
 
-    db.log_message(router_id, req.phone, req.message, "sent")
+    _log(router_id, req, "sent")
     return {"status": "sent", "router": router_id, "phone": req.phone}
+
+
+def _log(router_id: str, req: SendSmsRequest, status: str, error: str | None = None):
+    db.log_message(router_id, req.phone, req.message, status, error)
+    db.prune_messages(router_id, MAX_MESSAGES_DB)
 
 
 # ---------- historial y estadisticas ----------

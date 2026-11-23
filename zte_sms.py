@@ -170,6 +170,18 @@ class ZteSms:
             raise ZteApiError(f"No se pudieron borrar {remaining} SMS")
         return before
 
+    def sms_total(self) -> int:
+        """Cantidad de SMS guardados en la memoria del router (recibidos + enviados + borradores)."""
+        if not self.is_logged_in():
+            self.login()
+        return int(self.sms_capacity().get("sms_nv_total", 0) or 0)
+
+    def trim_sms(self, max_sms: int) -> int:
+        """Si la memoria del router llegó a max_sms, la vacía. Devuelve cuántos borró (0 si no hizo falta)."""
+        if max_sms <= 0 or self.sms_total() < max_sms:
+            return 0
+        return self.delete_all_sms()
+
     def logout(self):
         try:
             self._set("LOGOUT")

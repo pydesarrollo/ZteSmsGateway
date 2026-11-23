@@ -139,6 +139,22 @@ def log_message(router_id: str, phone: str, message: str, status: str, error: st
         )
 
 
+def prune_messages(router_id: str, keep: int):
+    """Deja solo los últimos `keep` mensajes de ese router; borra los más antiguos."""
+    if keep <= 0:
+        return
+    with _conn() as conn:
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE router_id = ? AND id NOT IN (
+                SELECT id FROM messages WHERE router_id = ? ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (router_id, router_id, keep),
+        )
+
+
 def list_messages(router_id: str | None = None, limit: int = 20, offset: int = 0) -> list[dict]:
     with _conn() as conn:
         if router_id:
