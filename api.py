@@ -22,6 +22,8 @@ import hmac
 import os
 from pathlib import Path
 
+import anyio
+import anyio.to_thread
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -42,6 +44,8 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 #   MAX_SMS_MODEM   -> si la memoria del módem llega a este número, se vacía antes de enviar
 MAX_MESSAGES_DB = int(os.environ.get("MAX_MESSAGES_DB", "50"))
 MAX_SMS_MODEM = int(os.environ.get("MAX_SMS_MODEM", "50"))
+#   MAX_QUEUE_MODEM -> envíos que pueden esperar turno por módem; más allá se responde 503
+MAX_QUEUE_MODEM = int(os.environ.get("MAX_QUEUE_MODEM", "20"))
 
 db.init_db()
 
@@ -137,11 +141,31 @@ def remove_router(router_id: str, x_api_key: str | None = Header(default=None)):
 # ---------- SMS ----------
 
 @app.post("/routers/{router_id}/sms/send")
-def send_sms(router_id: str, req: SendSmsRequest, x_api_key: str | None = Header(default=None)):
+async def send_sms(router_id: str, req: SendSmsRequest, x_api_key: str | None = Header(default=None)):
     check_api_key(x_api_key)
     router = get_router_or_404(router_id)
 
-    zte = ZteSms(router_ip=router["ip"], password=router["password"])
+    # Un envío a la vez por módem: el router identifica la sesión por IP, así que
+    # el logout de un envío paralelo cortaba la sesión de los demás.
+    # La espera del turno es async (no ocupa un thread del pool), así el dashboard
+    # y los demás endpoints siguen respondiendo aunque el módem esté lento.
+    # pendientes = el que se está enviando + los que esperan turno
+    if _pending.get(router_id, 0) > MAX_QUEUE_MODEM:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Modem '{router_id}' ocupado ({MAX_QUEUE_MODEM} envios en cola), reintente mas tarde",
+        )
+    _pending[router_id] = _pending.get(router_id, 0) + 1
+    try:
+        zte = ZteSms(router_ip=router["ip"], password=router["password"])
+        return await anyio.to_thread.run_sync(
+            _send_locked, zte, router_id, req, limiter=_router_limiter(router_id)
+        )
+    finally:
+        _pending[router_id] -= 1
+
+
+def _send_locked(zte: ZteSms, router_id: str, req: SendSmsRequest):
     try:
         # vaciar la memoria del módem antes de que se llene (llena = no envía);
         # si la limpieza falla, igual se intenta el envío
@@ -165,6 +189,17 @@ def send_sms(router_id: str, req: SendSmsRequest, x_api_key: str | None = Header
 
     _log(router_id, req, "sent")
     return {"status": "sent", "router": router_id, "phone": req.phone}
+
+
+_router_limiters: dict[str, anyio.CapacityLimiter] = {}
+_pending: dict[str, int] = {}
+
+
+def _router_limiter(router_id: str) -> anyio.CapacityLimiter:
+    # solo se llama desde el event loop (un único thread), no necesita lock
+    if router_id not in _router_limiters:
+        _router_limiters[router_id] = anyio.CapacityLimiter(1)
+    return _router_limiters[router_id]
 
 
 def _log(router_id: str, req: SendSmsRequest, status: str, error: str | None = None):

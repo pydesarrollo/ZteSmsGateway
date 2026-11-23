@@ -171,10 +171,17 @@ class ZteSms:
         return before
 
     def sms_total(self) -> int:
-        """Cantidad de SMS guardados en la memoria del router (recibidos + enviados + borradores)."""
+        """Cantidad de SMS guardados en la memoria del router (recibidos + enviados + borradores).
+
+        Ojo: sms_nv_total es la CAPACIDAD (100 en el MF920V), no lo ocupado.
+        """
         if not self.is_logged_in():
             self.login()
-        return int(self.sms_capacity().get("sms_nv_total", 0) or 0)
+        cap = self.sms_capacity()
+        return sum(
+            int(cap.get(k, 0) or 0)
+            for k in ("sms_nv_rev_total", "sms_nv_send_total", "sms_nv_draftbox_total")
+        )
 
     def trim_sms(self, max_sms: int) -> int:
         """Si la memoria del router llegó a max_sms, la vacía. Devuelve cuántos borró (0 si no hizo falta)."""
