@@ -52,6 +52,14 @@ def to_gsm7(text: str) -> str | None:
     return "".join(out)
 
 
+def sms_parts(texto: str, encode_type: str) -> int:
+    """Cuántas partes ocupa el SMS en la red."""
+    if encode_type == "GSM7_default":
+        largo = sum(2 if c in _GSM7_EXT else 1 for c in texto)
+        return 1 if largo <= 160 else -(-largo // 153)
+    return 1 if len(texto) <= 70 else -(-len(texto) // 67)
+
+
 # sms_cmd_status_info (mismo mecanismo que usa la web del módem en js/service.js)
 SMS_CMD_SEND = "4"
 SMS_CMD_DELETE = "6"
@@ -67,6 +75,8 @@ class ZteSms:
         timeout: int = 10,
         send_wait: float = 20,
         gsm7: bool = True,
+        min_wait_per_part: float = 1.2,
+        verify: bool = True,
     ):
         self.router_ip = router_ip
         self.password = password
@@ -75,6 +85,11 @@ class ZteSms:
         # True: quitar tildes y enviar en GSM-7 cuando se pueda (153 caracteres
         # por parte en vez de 67: la mitad de partes, de tiempo y de costo)
         self.gsm7 = gsm7
+        # segundos mínimos por parte entre un envío y el siguiente (0 = no esperar)
+        self.min_wait_per_part = min_wait_per_part
+        # leer del módem el SMS guardado tras enviar, para detectar mensajes cortados
+        self.verify = verify
+        self.last_check: tuple[int, int, int] | None = None  # (guardado, enviado, partes)
         self.session = requests.Session()
         self.base_url = f"http://{router_ip}"
         self.headers = {
@@ -165,12 +180,41 @@ class ZteSms:
             result = self._set("SEND_SMS", data)
         if result.get("result") not in ("success", "0"):
             raise ZteApiError(f"Fallo al enviar SMS: {result}")
+        t_envio = time.monotonic()
         # SEND_SMS solo encola: el módem sigue enviando unos segundos más. Mientras
         # tanto rechaza borrados, así que hay que esperar a que termine.
         status = self.wait_sms_cmd(SMS_CMD_SEND, self.send_wait)
         if status == SMS_STATUS_FAIL:
             raise ZteApiError("El modem no pudo enviar el SMS (sin saldo, sin señal o numero invalido)")
+
+        # Mensajes de varias partes: el módem puede reportar "terminado" antes de
+        # despachar todas, y el siguiente SEND_SMS corta las que faltan (se vieron
+        # SMS guardados con solo 2 de 4 partes). Se espera un mínimo por parte.
+        partes = sms_parts(texto, encode_type)
+        restante = partes * self.min_wait_per_part - (time.monotonic() - t_envio)
+        if restante > 0:
+            time.sleep(restante)
+
+        self.last_check = None
+        if self.verify:
+            try:
+                guardado = self.last_sent_text()
+                if guardado is not None:
+                    self.last_check = (len(guardado), len(texto), partes)
+            except Exception:
+                pass  # la verificación es solo informativa
         return result
+
+    def last_sent_text(self) -> str | None:
+        """Texto del último SMS enviado tal como quedó guardado en el módem."""
+        msgs = self._list_messages(tags="2", limit=1)
+        if not msgs:
+            return None
+        content = msgs[0].get("content", "")
+        try:
+            return bytes.fromhex(content).decode("utf-16-be")
+        except ValueError:
+            return content
 
     def sms_cmd_status(self, sms_cmd: str) -> str:
         """Estado del último comando SMS del módem: '1'=en curso, '2'=falló, '3'=terminó bien."""
@@ -214,6 +258,9 @@ class ZteSms:
         """IDs de SMS en el router. tags: 10=todos, 1=recibidos, 2=enviados, 3=borradores."""
         if not self.is_logged_in():
             self.login()
+        return [m["id"] for m in self._list_messages(tags, limit)]
+
+    def _list_messages(self, tags: str, limit: int) -> list[dict]:
         # sms_data_total es un comando simple: sin multi_data, la respuesta trae "messages"
         r = self.session.get(
             f"{self.base_url}/goform/goform_get_cmd_process",
@@ -230,7 +277,7 @@ class ZteSms:
             timeout=self.timeout,
         )
         r.raise_for_status()
-        return [m["id"] for m in r.json().get("messages", [])]
+        return r.json().get("messages", [])
 
     def delete_sms(self, ids: list[str]) -> dict:
         if not ids:

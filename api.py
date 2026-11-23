@@ -50,6 +50,11 @@ MAX_QUEUE_MODEM = int(os.environ.get("MAX_QUEUE_MODEM", "20"))
 #   SMS_GSM7 -> 1: quitar tildes (á→a...) y enviar en modo GSM (153 caracteres por
 #               parte en vez de 67: la mitad de partes). 0: enviar tal cual (Unicode)
 SMS_GSM7 = os.environ.get("SMS_GSM7", "1") == "1"
+#   SMS_ESPERA_POR_PARTE -> segundos mínimos por parte antes del siguiente envío
+#                           (evita que el siguiente SMS corte las últimas partes)
+SMS_ESPERA_POR_PARTE = float(os.environ.get("SMS_ESPERA_POR_PARTE", "1.2"))
+#   SMS_VERIFICAR -> 1: tras cada envío, leer del módem lo guardado y avisar si salió cortado
+SMS_VERIFICAR = os.environ.get("SMS_VERIFICAR", "1") == "1"
 
 db.init_db()
 
@@ -179,7 +184,8 @@ TRIM_EVERY = 10  # revisar la memoria del módem cada N envíos
 def _get_client(router: dict, router_id: str) -> ZteSms:
     zte = _clients.get(router_id)
     if zte is None or zte.router_ip != router["ip"] or zte.password != router["password"]:
-        zte = ZteSms(router_ip=router["ip"], password=router["password"], gsm7=SMS_GSM7)
+        zte = ZteSms(router_ip=router["ip"], password=router["password"], gsm7=SMS_GSM7,
+                     min_wait_per_part=SMS_ESPERA_POR_PARTE, verify=SMS_VERIFICAR)
         zte.login()
         _clients[router_id] = zte
         _sends_since_trim[router_id] = TRIM_EVERY  # revisar la memoria al empezar
@@ -214,7 +220,13 @@ def _send_locked(router: dict, router_id: str, req: SendSmsRequest):
         _log(router_id, req, "failed", error)
         raise HTTPException(status_code=500, detail=error)
 
-    print(f"[{router_id}] SMS enviado en {time.monotonic() - t0:.1f}s", flush=True)
+    detalle = ""
+    if zte.last_check:
+        guardado, enviado, partes = zte.last_check
+        detalle = f", {partes} partes"
+        if guardado < enviado:
+            detalle += f", CORTADO: el modem guardo {guardado} de {enviado} caracteres"
+    print(f"[{router_id}] SMS enviado en {time.monotonic() - t0:.1f}s{detalle}", flush=True)
     _log(router_id, req, "sent")
     return {"status": "sent", "router": router_id, "phone": req.phone}
 
