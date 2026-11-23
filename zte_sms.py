@@ -18,11 +18,25 @@ class ZteApiError(Exception):
     pass
 
 
+# sms_cmd_status_info (mismo mecanismo que usa la web del módem en js/service.js)
+SMS_CMD_SEND = "4"
+SMS_CMD_DELETE = "6"
+SMS_STATUS_FAIL = "2"
+SMS_STATUS_OK = "3"
+
+
 class ZteSms:
-    def __init__(self, router_ip: str = "192.168.0.1", password: str = "admin", timeout: int = 10):
+    def __init__(
+        self,
+        router_ip: str = "192.168.0.1",
+        password: str = "admin",
+        timeout: int = 10,
+        send_wait: float = 20,
+    ):
         self.router_ip = router_ip
         self.password = password
         self.timeout = timeout
+        self.send_wait = send_wait  # segundos máx. esperando que el módem termine un envío
         self.session = requests.Session()
         self.base_url = f"http://{router_ip}"
         self.headers = {
@@ -100,7 +114,36 @@ class ZteSms:
         result = self._set("SEND_SMS", data)
         if result.get("result") not in ("success", "0"):
             raise ZteApiError(f"Fallo al enviar SMS: {result}")
+        # SEND_SMS solo encola: el módem sigue enviando unos segundos más. Mientras
+        # tanto rechaza borrados, así que hay que esperar a que termine.
+        status = self.wait_sms_cmd(SMS_CMD_SEND, self.send_wait)
+        if status == SMS_STATUS_FAIL:
+            raise ZteApiError("El modem no pudo enviar el SMS (sin saldo, sin señal o numero invalido)")
         return result
+
+    def sms_cmd_status(self, sms_cmd: str) -> str:
+        """Estado del último comando SMS del módem: '1'=en curso, '2'=falló, '3'=terminó bien."""
+        r = self.session.get(
+            f"{self.base_url}/goform/goform_get_cmd_process",
+            params={"isTest": "false", "cmd": "sms_cmd_status_info", "sms_cmd": sms_cmd},
+            headers=self.headers,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return str(r.json().get("sms_cmd_status_result", ""))
+
+    def wait_sms_cmd(self, sms_cmd: str, timeout: float) -> str:
+        """Espera a que el módem termine el comando. Devuelve '2', '3', o '' si no se supo a tiempo."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                status = self.sms_cmd_status(sms_cmd)
+            except Exception:
+                status = ""
+            if status in (SMS_STATUS_FAIL, SMS_STATUS_OK):
+                return status
+            time.sleep(0.5)
+        return ""
 
     def sms_capacity(self) -> dict:
         # comando simple: sin multi_data
@@ -146,28 +189,34 @@ class ZteSms:
         return result
 
     def delete_all_sms(self) -> int:
-        """Vacía todas las bandejas con ALL_DELETE_SMS. Devuelve cuántos SMS había antes."""
-        if not self.is_logged_in():
-            self.login()
-        before = len(self.list_sms_ids(limit=500))
+        """Vacía la memoria de SMS. Devuelve cuántos había antes.
+
+        El resultado se verifica con el contador de sms_capacity_info: la lista
+        (sms_data_total) puede venir vacía cuando el módem está ocupado aunque
+        tenga la memoria llena.
+        """
+        before = self.sms_total()
+        if before == 0:
+            return 0
         # ALL_DELETE_SMS falla si la bandeja está vacía, por eso se ignora el resultado
         for location in ("native_inbox", "native_outbox", "native_sentbox", "native_draftbox"):
             self._set("ALL_DELETE_SMS", {"notCallback": "true", "which_cgi": location})
-        time.sleep(2)
-        # lo que quede (p. ej. enviados) se borra por id, en lotes pequeños
-        for size in (10, 1):
-            while True:
-                ids = self.list_sms_ids(limit=size)
-                if not ids:
-                    return before
+        self.wait_sms_cmd(SMS_CMD_DELETE, 10)
+        # lo que quede (p. ej. enviados) se borra por id
+        for size in (100, 10, 10, 10):
+            if self.sms_total() == 0:
+                return before
+            ids = self.list_sms_ids(limit=size)
+            if ids:
                 try:
                     self.delete_sms(ids)
                 except ZteApiError:
-                    break
-                time.sleep(0.3)
-        remaining = len(self.list_sms_ids(limit=500))
+                    pass
+                self.wait_sms_cmd(SMS_CMD_DELETE, 10)
+            time.sleep(1)
+        remaining = self.sms_total()
         if remaining:
-            raise ZteApiError(f"No se pudieron borrar {remaining} SMS")
+            raise ZteApiError(f"No se pudieron borrar {remaining} de {before} SMS")
         return before
 
     def sms_total(self) -> int:
