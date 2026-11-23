@@ -20,6 +20,7 @@ Llamar desde otro equipo de la red:
 """
 import hmac
 import os
+import time
 from pathlib import Path
 
 import anyio
@@ -157,36 +158,60 @@ async def send_sms(router_id: str, req: SendSmsRequest, x_api_key: str | None = 
         )
     _pending[router_id] = _pending.get(router_id, 0) + 1
     try:
-        zte = ZteSms(router_ip=router["ip"], password=router["password"])
         return await anyio.to_thread.run_sync(
-            _send_locked, zte, router_id, req, limiter=_router_limiter(router_id)
+            _send_locked, router, router_id, req, limiter=_router_limiter(router_id)
         )
     finally:
         _pending[router_id] -= 1
 
 
-def _send_locked(zte: ZteSms, router_id: str, req: SendSmsRequest):
+# Una conexión (sesión) por módem, reutilizada entre envíos: iniciar y cerrar
+# sesión en cada SMS costaba varios segundos (la web del módem es lenta).
+# Solo se usa dentro del limiter del router, o sea de a un thread por módem.
+_clients: dict[str, ZteSms] = {}
+_sends_since_trim: dict[str, int] = {}
+TRIM_EVERY = 10  # revisar la memoria del módem cada N envíos
+
+
+def _get_client(router: dict, router_id: str) -> ZteSms:
+    zte = _clients.get(router_id)
+    if zte is None or zte.router_ip != router["ip"] or zte.password != router["password"]:
+        zte = ZteSms(router_ip=router["ip"], password=router["password"])
+        zte.login()
+        _clients[router_id] = zte
+        _sends_since_trim[router_id] = TRIM_EVERY  # revisar la memoria al empezar
+    return zte
+
+
+def _send_locked(router: dict, router_id: str, req: SendSmsRequest):
+    t0 = time.monotonic()
     try:
+        zte = _get_client(router, router_id)
+
         # vaciar la memoria del módem antes de que se llene (llena = no envía);
         # si la limpieza falla, igual se intenta el envío
-        try:
-            borrados = zte.trim_sms(MAX_SMS_MODEM)
-            if borrados:
-                print(f"[{router_id}] memoria del modem vaciada: {borrados} SMS borrados", flush=True)
-        except Exception as e:
-            print(f"[{router_id}] no se pudo vaciar la memoria del modem: {e}", flush=True)
+        if _sends_since_trim.get(router_id, 0) >= TRIM_EVERY:
+            _sends_since_trim[router_id] = 0
+            try:
+                borrados = zte.trim_sms(MAX_SMS_MODEM)
+                if borrados:
+                    print(f"[{router_id}] memoria del modem vaciada: {borrados} SMS borrados", flush=True)
+            except Exception as e:
+                print(f"[{router_id}] no se pudo vaciar la memoria del modem: {e}", flush=True)
 
         zte.send_sms(req.phone, req.message)
+        _sends_since_trim[router_id] = _sends_since_trim.get(router_id, 0) + 1
     except ZteApiError as e:
         _log(router_id, req, "failed", str(e))
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
+        # sesión/conexión en mal estado: la próxima vez se crea de nuevo
+        _clients.pop(router_id, None)
         error = f"Error de conexion con el modem: {e}"
         _log(router_id, req, "failed", error)
         raise HTTPException(status_code=500, detail=error)
-    finally:
-        zte.logout()
 
+    print(f"[{router_id}] SMS enviado en {time.monotonic() - t0:.1f}s", flush=True)
     _log(router_id, req, "sent")
     return {"status": "sent", "router": router_id, "phone": req.phone}
 

@@ -100,9 +100,12 @@ class ZteSms:
         return info.get("loginfo") == "ok"
 
     def send_sms(self, phone_number: str, message: str) -> dict:
-        if not self.is_logged_in():
-            self.login()
+        """Envía y espera a que el módem termine.
 
+        No consulta loginfo antes de cada envío (cada consulta a la web del
+        módem tarda): si la sesión venció, SEND_SMS falla sin encolar nada, y
+        entonces se inicia sesión y se reintenta una vez.
+        """
         data = {
             "notCallback": "true",
             "Number": phone_number,
@@ -112,6 +115,9 @@ class ZteSms:
             "encode_type": "UNICODE",
         }
         result = self._set("SEND_SMS", data)
+        if result.get("result") not in ("success", "0"):
+            self.login()
+            result = self._set("SEND_SMS", data)
         if result.get("result") not in ("success", "0"):
             raise ZteApiError(f"Fallo al enviar SMS: {result}")
         # SEND_SMS solo encola: el módem sigue enviando unos segundos más. Mientras
@@ -135,6 +141,9 @@ class ZteSms:
     def wait_sms_cmd(self, sms_cmd: str, timeout: float) -> str:
         """Espera a que el módem termine el comando. Devuelve '2', '3', o '' si no se supo a tiempo."""
         deadline = time.monotonic() + timeout
+        # pausa inicial: que el módem alcance a marcar el comando nuevo como "en
+        # curso" y no se lea el resultado del comando anterior
+        time.sleep(0.3)
         while time.monotonic() < deadline:
             try:
                 status = self.sms_cmd_status(sms_cmd)
@@ -142,7 +151,7 @@ class ZteSms:
                 status = ""
             if status in (SMS_STATUS_FAIL, SMS_STATUS_OK):
                 return status
-            time.sleep(0.5)
+            time.sleep(0.2)
         return ""
 
     def sms_capacity(self) -> dict:
