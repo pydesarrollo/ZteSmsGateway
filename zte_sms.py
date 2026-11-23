@@ -10,12 +10,46 @@ el propio router (192.168.0.1).
 import base64
 import codecs
 import time
+import unicodedata
 
 import requests
 
 
 class ZteApiError(Exception):
     pass
+
+
+# Alfabeto GSM 03.38 (modo "normal" de SMS: 160 caracteres, 153 por parte si
+# el mensaje va en varias partes). Cualquier carácter fuera de él obliga a
+# enviar en UCS-2/Unicode: 70 caracteres, 67 por parte.
+_GSM7_BASIC = set(
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+)
+_GSM7_EXT = set("^{}\\[~]|€")  # válidos, pero ocupan 2 posiciones
+_GSM7_REEMPLAZOS = {
+    " ": " ", "‘": "'", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "-", "…": "...", "\t": " ",
+}
+
+
+def to_gsm7(text: str) -> str | None:
+    """Adapta el texto al alfabeto GSM: quita las tildes que GSM no tiene
+    (á→a, í→i, ó→o, ú→u...) y conserva ñ, é, ü, ¡, ¿. Devuelve None si queda
+    algún carácter imposible de adaptar (emoji, etc.): ese mensaje va en Unicode.
+    """
+    out = []
+    for ch in text:
+        ch = _GSM7_REEMPLAZOS.get(ch, ch)
+        if all(c in _GSM7_BASIC or c in _GSM7_EXT for c in ch):
+            out.append(ch)
+            continue
+        base = "".join(c for c in unicodedata.normalize("NFD", ch) if not unicodedata.combining(c))
+        if base and all(c in _GSM7_BASIC for c in base):
+            out.append(base)
+        else:
+            return None
+    return "".join(out)
 
 
 # sms_cmd_status_info (mismo mecanismo que usa la web del módem en js/service.js)
@@ -32,11 +66,15 @@ class ZteSms:
         password: str = "admin",
         timeout: int = 10,
         send_wait: float = 20,
+        gsm7: bool = True,
     ):
         self.router_ip = router_ip
         self.password = password
         self.timeout = timeout
         self.send_wait = send_wait  # segundos máx. esperando que el módem termine un envío
+        # True: quitar tildes y enviar en GSM-7 cuando se pueda (153 caracteres
+        # por parte en vez de 67: la mitad de partes, de tiempo y de costo)
+        self.gsm7 = gsm7
         self.session = requests.Session()
         self.base_url = f"http://{router_ip}"
         self.headers = {
@@ -106,13 +144,20 @@ class ZteSms:
         módem tarda): si la sesión venció, SEND_SMS falla sin encolar nada, y
         entonces se inicia sesión y se reintenta una vez.
         """
+        # MessageBody siempre va en hex UCS-2 (igual que la web del módem);
+        # encode_type le dice al módem cómo enviarlo por la red
+        texto, encode_type = message, "UNICODE"
+        if self.gsm7:
+            adaptado = to_gsm7(message)
+            if adaptado is not None:
+                texto, encode_type = adaptado, "GSM7_default"
         data = {
             "notCallback": "true",
             "Number": phone_number,
             "sms_time": time.strftime("%y;%m;%d;%H;%M;%S;+0"),
-            "MessageBody": self._encode_ucs2(message),
+            "MessageBody": self._encode_ucs2(texto),
             "ID": "-1",
-            "encode_type": "UNICODE",
+            "encode_type": encode_type,
         }
         result = self._set("SEND_SMS", data)
         if result.get("result") not in ("success", "0"):

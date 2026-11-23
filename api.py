@@ -47,6 +47,9 @@ MAX_MESSAGES_DB = int(os.environ.get("MAX_MESSAGES_DB", "50"))
 MAX_SMS_MODEM = int(os.environ.get("MAX_SMS_MODEM", "50"))
 #   MAX_QUEUE_MODEM -> envíos que pueden esperar turno por módem; más allá se responde 503
 MAX_QUEUE_MODEM = int(os.environ.get("MAX_QUEUE_MODEM", "20"))
+#   SMS_GSM7 -> 1: quitar tildes (á→a...) y enviar en modo GSM (153 caracteres por
+#               parte en vez de 67: la mitad de partes). 0: enviar tal cual (Unicode)
+SMS_GSM7 = os.environ.get("SMS_GSM7", "1") == "1"
 
 db.init_db()
 
@@ -56,7 +59,7 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 class SendSmsRequest(BaseModel):
     phone: str = Field(..., description="Número destino, con código de país. Ej: +51987654321")
-    message: str = Field(..., min_length=1, max_length=600)
+    message: str = Field(..., min_length=1, max_length=765)  # 5 partes de 153 (GSM)
 
 
 class RouterIn(BaseModel):
@@ -176,7 +179,7 @@ TRIM_EVERY = 10  # revisar la memoria del módem cada N envíos
 def _get_client(router: dict, router_id: str) -> ZteSms:
     zte = _clients.get(router_id)
     if zte is None or zte.router_ip != router["ip"] or zte.password != router["password"]:
-        zte = ZteSms(router_ip=router["ip"], password=router["password"])
+        zte = ZteSms(router_ip=router["ip"], password=router["password"], gsm7=SMS_GSM7)
         zte.login()
         _clients[router_id] = zte
         _sends_since_trim[router_id] = TRIM_EVERY  # revisar la memoria al empezar
