@@ -1,17 +1,20 @@
 # Arranque automático al iniciar Windows
 
-Ya existen en la raíz del proyecto (`D:\Proyectos\Python\ZteSmsGateway`):
+Ya existen en la raíz del proyecto. Usan la carpeta donde estén guardados, así que funcionan
+sin editar en cualquier ruta (ej. `C:\Apps\ZteSmsGateway` en el servidor):
 
 `iniciar_api.bat`:
 ```bat
 @echo off
-cd /d D:\Proyectos\Python\ZteSmsGateway
-python -m uvicorn api:app --host 0.0.0.0 --port 8888 >> log.txt 2>&1
+cd /d "%~dp0"
+python -m uvicorn api:app --host 0.0.0.0 --port 8000 >> log.txt 2>&1
 ```
 
 `iniciar_api_oculto.vbs` (lanza el `.bat` sin mostrar ventana de consola):
 ```vbscript
-CreateObject("WScript.Shell").Run """D:\Proyectos\Python\ZteSmsGateway\iniciar_api.bat""", 0, False
+Set fso = CreateObject("Scripting.FileSystemObject")
+carpeta = fso.GetParentFolderName(WScript.ScriptFullName)
+CreateObject("WScript.Shell").Run """" & carpeta & "\iniciar_api.bat""", 0, False
 ```
 
 > El `.vbs` es necesario porque `schtasks /sc onlogon` sin credenciales
@@ -25,7 +28,7 @@ CreateObject("WScript.Shell").Run """D:\Proyectos\Python\ZteSmsGateway\iniciar_a
 Abrir **PowerShell como Administrador** y ejecutar:
 
 ```powershell
-schtasks /create /tn "SMS Gateway API" /tr "D:\Proyectos\Python\ZteSmsGateway\iniciar_api_oculto.vbs" /sc onlogon /rl highest /f
+schtasks /create /tn "SMS Gateway API" /tr "C:\Apps\ZteSmsGateway\iniciar_api_oculto.vbs" /sc onlogon /rl highest /f
 ```
 
 (apuntar directo al `.vbs` alcanza — Windows lo asocia con `wscript.exe` solo.
@@ -45,14 +48,14 @@ sobrescribe la tarea existente).
 
 ## Probar
 
-Antes de probar, cerrar cualquier `uvicorn` corriendo a mano en el puerto 8888
+Antes de probar, cerrar cualquier `uvicorn` corriendo a mano en el puerto 8000
 (si no, la tarea fallará por puerto ocupado):
 
 ```powershell
 schtasks /run /tn "SMS Gateway API"
 ```
 
-Luego entrar a `http://localhost:8888/` — debería responder. También se puede
+Luego entrar a `http://localhost:8000/` — debería responder. También se puede
 reiniciar la PC y verificar que arranca solo al llegar al escritorio.
 
 ## Ver logs / errores
@@ -69,10 +72,10 @@ schtasks /end /tn "SMS Gateway API"
 ```
 
 Si eso no la corta (por ejemplo porque la iniciaste a mano, no por la tarea),
-mata el proceso que tiene el puerto 8888 abierto:
+mata el proceso que tiene el puerto 8000 abierto:
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8888 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+Get-NetTCPConnection -LocalPort 8000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 ```
 
 ## Si cambias el puerto (u otra cosa del `.bat`)
@@ -88,7 +91,7 @@ lo mata, solo borra el registro de la tarea. Pasos:
    ```
 3. Recrear la tarea y correrla (usa el `.bat` actualizado):
    ```powershell
-   schtasks /create /tn "SMS Gateway API" /tr "D:\Proyectos\Python\ZteSmsGateway\iniciar_api_oculto.vbs" /sc onlogon /rl highest /f
+   schtasks /create /tn "SMS Gateway API" /tr "C:\Apps\ZteSmsGateway\iniciar_api_oculto.vbs" /sc onlogon /rl highest /f
    schtasks /run /tn "SMS Gateway API"
    ```
 
